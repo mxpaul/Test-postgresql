@@ -1,10 +1,7 @@
 package Test::PostgreSQL;
-use 5.14.0;
 use strict;
 use warnings;
-use Moo;
-use Types::Standard -all;
-use Function::Parameters qw(:strict);
+use Mouse;
 use Try::Tiny;
 use DBI;
 use File::Spec;
@@ -38,11 +35,11 @@ tie our %Defaults, 'Tie::Hash::Method', FETCH => sub {
 # *Note that these are used only if the program isn't already in the path!*
 has search_paths => (
   is => "ro",
-  isa => ArrayRef,
+  isa => 'ArrayRef',
   builder => "_search_paths",
 );
 
-method _search_paths() {
+sub _search_paths { my $self = shift;
     my @base_paths = (
         # popular installation dir?
         qw(/usr/local/pgsql),
@@ -68,7 +65,7 @@ method _search_paths() {
 # The final port ends up in the ->port attribute.
 has base_port => (
   is => "ro",
-  isa => Int,
+  isa => 'Int',
   default => 15432,
 );
 
@@ -87,43 +84,45 @@ has base_dir => (
         TMPDIR  => 1
     );
   },
-  coerce => fun ($newval) {
-    # Ensure base_dir is absolute; usually only the case if the user set it.
-    # Avoid munging objects such as File::Temp
-    ref $newval ? $newval : File::Spec->rel2abs($newval);
-  },
+  #coerce => sub { my $newval = shift;
+  #  # Ensure base_dir is absolute; usually only the case if the user set it.
+  #  # Avoid munging objects such as File::Temp
+  #  ref $newval ? $newval : File::Spec->rel2abs($newval);
+  #},
 );
 
 has initdb => (
   is => "ro",
-  isa => Str,
+  isa => 'Str',
   lazy => 1,
-  default => method () { $self->_find_program('initdb') || die $errstr },
+  default => sub { $_[0]->_find_program('initdb') || die $errstr },
 );
 
 has initdb_args => (
-  is => "lazy",
-  isa => Str,
+  is => "rw",
+  lazy => 1,
+  isa => 'Str',
+  builder => '_build_initdb_args',
 );
 
-method _build_initdb_args() {
+sub _build_initdb_args { my $self = shift;
     return "-U postgres -A trust " . $self->extra_initdb_args;
 }
 
 has extra_initdb_args => (
   is      => "ro",
-  isa     => Str,
+  isa     => 'Str',
   default => "",
 );
 
 has pg_ctl => (
   is => "ro",
-  isa => Maybe[Str],
+  isa => 'Maybe[Str]',
   lazy => 1,
   builder => "_pg_ctl_builder",
 );
 
-method _pg_ctl_builder() {
+sub _pg_ctl_builder { my $self = shift;
   my $prog = $self->_find_program('pg_ctl');
   if ( $prog ) {
       # we only use pg_ctl if Pg version is >= 9
@@ -139,31 +138,31 @@ method _pg_ctl_builder() {
 
 has pid => (
   is => "rw",
-  isa => Maybe[Int],
+  isa => 'Maybe[Int]',
 );
 
 has port => (
   is => "rw",
-  isa => Maybe[Int],
+  isa => 'Maybe[Int]',
 );
 
 has uid => (
   is => "rw",
-  isa => Maybe[Int],
+  isa => 'Maybe[Int]',
 );
 
 # Are we running as root? (Typical when run inside Docker containers)
 has is_root => (
   is => "ro",
-  isa => Bool,
+  isa => 'Bool',
   default => sub { getuid == 0 }
 );
 
 has postmaster => (
   is => "rw",
-  isa => Str,
+  isa => 'Str',
   lazy => 1,
-  default => method () {
+  default => sub { my $self = shift;
     $self->_find_program("postgres")
     || $self->_find_program("postmaster")
     || die $errstr
@@ -171,28 +170,31 @@ has postmaster => (
 );
 
 has postmaster_args => (
-  is => "lazy",
-  isa => Str,
+  is => "rw",
+  isa => 'Str',
+  lazy => 1,
+  builder => '_build_postmaster_args',
 );
 
-method _build_postmaster_args() {
+sub _build_postmaster_args { my $self = shift;
     return "-h 127.0.0.1 -F " . $self->extra_postmaster_args;
 }
 
 has extra_postmaster_args => (
     is      => "ro",
-    isa     => Str,
+    isa     => 'Str',
     default => "",
 );
 
 has _owner_pid => (
   is => "ro",
-  isa => Int,
+  isa => 'Int',
   default => sub { $$ },
 );
 
-method BUILD($) {
+sub BUILD { my $self = shift;
     # Ensure we have one or the other ways of starting Postgres:
+    $self->{base_dir} = File::Spec->rel2abs($self->{base_dir}) unless ref $self->{base_dir};
     try { $self->pg_ctl or $self->postmaster } catch { die $_ };
 
     if (defined $self->uid and $self->uid == 0) {
@@ -221,7 +223,8 @@ method BUILD($) {
     }
 }
 
-method DEMOLISH($in_global_destruction) {
+sub DEMOLISH {
+		my ($self, $in_global_destruction) = (shift, shift);
     local $?;
     if (defined $self->pid && $self->_owner_pid == $$) {
       $self->stop
@@ -251,7 +254,7 @@ sub uri {
     return sprintf('postgresql://%s@%s:%d/%s', @args{qw/user host port dbname/});
 }
 
-method start() {
+sub start { my $self = shift;
     if (defined $self->pid) {
       warn "Apparently already started on " . $self->pid . "; not restarting.";
       return;
@@ -271,7 +274,7 @@ method start() {
 
 # This whole method was mostly cargo-culted from the earlier test-postgresql;
 # It could probably be made more sane.
-method _find_port_and_launch() {
+sub _find_port_and_launch { my $self = shift;
   my $tries = 10;
   my $port = $self->base_port;
   # try by incrementing port number
@@ -292,7 +295,7 @@ method _find_port_and_launch() {
   }
 }
 
-method _try_start($port) {
+sub _try_start { my ($self, $port) = (shift, shift);
     my $logfile = File::Spec->catfile($self->base_dir, 'postgres.log');
 
     if ( $self->pg_ctl ) {
@@ -371,7 +374,8 @@ method _try_start($port) {
     return;
 }
 
-method stop($sig = SIGQUIT) {
+sub stop {
+		my ($self, $sig) = (shift, shift); $sig //= SIGQUIT;
     if ( $self->pg_ctl && defined $self->base_dir ) {
         my @cmd = (
             $self->pg_ctl, 'stop', '-s', '-D',
@@ -406,7 +410,7 @@ method stop($sig = SIGQUIT) {
     return;
 }
 
-method _create_test_database() {
+sub _create_test_database { my $self = shift;
   my $tries = 5;
   my $dbh;
   while ($tries) {
@@ -436,7 +440,7 @@ method _create_test_database() {
   return;
 }
 
-method setup() {
+sub setup { my $self = shift;
     # (re)create directory structure
     mkdir $self->base_dir;
     chmod 0755, $self->base_dir
@@ -512,7 +516,7 @@ method setup() {
     }
 }
 
-method _find_program($prog) {
+sub _find_program { my ($self, $prog) = (shift, shift);
     undef $errstr;
     my $path = which $prog;
     return $path if $path;
@@ -524,7 +528,7 @@ method _find_program($prog) {
     return;
 }
 
-method setuid_cmd(@cmd) {
+sub setuid_cmd { my $self = shift; my @cmd = @_;
   my $pid = fork;
   if ($pid == 0) {
     chdir $self->base_dir;
